@@ -13,6 +13,10 @@ Structures, enums, etc... can be treated like primitives or dicts, so there is n
 One of the goals is to provide generic interface for writing constraints, so that user can
 implement constraints like `HasMethod`, `Addable`, and so on themselves.
 
+## TODO:
+- Solve constraints on unions. For example Addable(union{int, str}, int) -> ?T1 should return error after checking both possibilities separately.
+- Implement missing cases for dicts.
+
 ## Resources
 This project is based mainly on our past knowledge, but some other resources were also used during research:
 - https://smallcultfollowing.com/babysteps/blog/2017/03/25/unification-in-chalk-part-1/

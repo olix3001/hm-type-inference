@@ -89,10 +89,22 @@ pub const ApplicativeTy = struct {
     types: []Ty,
 };
 
+const SolveFn = fn (self: *anyopaque, cx: *SolverContext, constraint: Constraint) anyerror![]const Constraint;
+pub const Constraint = struct {
+    solver: usize,
+    params: []const Ty,
+};
+pub const ConstraintSolver = struct {
+    self: *anyopaque,
+    solve_fn: *const SolveFn,
+};
+
 pub const SolverContext = struct {
     arena: std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
     entries: std.ArrayListUnmanaged(Entry) = .{},
+    solvers: std.ArrayListUnmanaged(ConstraintSolver) = .{},
+    worklist: std.ArrayListUnmanaged(Constraint) = .{},
     concrete_amount: usize = 0,
 
     pub const Entry = union(enum) {
@@ -111,6 +123,8 @@ pub const SolverContext = struct {
     }
     pub fn deinit(self: *Self) void {
         self.entries.deinit(self.allocator);
+        self.solvers.deinit(self.allocator);
+        self.worklist.deinit(self.allocator);
     }
 
     // Creates fresh type variable with no constraints.
@@ -244,6 +258,13 @@ pub const SolverContext = struct {
         }
     }
 
+    pub fn isOpen(self: *Self, t: Ty) !bool {
+        return switch (try self.normalize(t)) {
+            .variable => true,
+            else => false,
+        };
+    }
+
     // Try to unify two types into one.
     // For example if we use `unify(?T1, int)`, `?T1` will change its type into `int`.
     // This part is really complex, as it needs to handle all possible combinations of a and b types.
@@ -323,6 +344,35 @@ pub const SolverContext = struct {
                 },
                 else => return error.TypeMismatch,
             },
+        }
+    }
+
+    pub fn registerSolver(self: *Self, solver: anytype) !usize {
+        const current = self.solvers.items.len;
+        try self.solvers.append(self.allocator, .{
+            .self = @ptrCast(@constCast(solver)),
+            .solve_fn = @ptrCast(&@typeInfo(@TypeOf(solver)).pointer.child.solve),
+        });
+        return current;
+    }
+
+    pub fn addConstraint(self: *Self, constraint: Constraint) !void {
+        try self.worklist.append(self.allocator, constraint);
+    }
+
+    pub fn solveAll(self: *Self) !void {
+        while (self.worklist.pop()) |c| {
+            const solver = self.solvers.items[c.solver];
+
+            const extra = try solver.solve_fn(solver.self, self, c);
+            try self.worklist.appendSlice(self.allocator, extra);
+        }
+
+        for (self.entries.items, 0..) |entry, i| {
+            if (std.meta.activeTag(entry) != .qualified) {
+                std.debug.print("Type variable ?T{d} remains unresolved\n", .{i});
+                return error.UnsatisfiedConstraints;
+            }
         }
     }
 
