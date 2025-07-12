@@ -10,29 +10,51 @@ pub fn main() !void {
     var cx = lib.SolverContext.init(alloc);
     defer cx.deinit();
 
-    const vX = try cx.newTypeVar();
-    const vY = try cx.newTypeVar();
-    const vR = try cx.newTypeVar();
-
     const int = cx.newConcrete();
     const float = cx.newConcrete();
     const str = cx.newConcrete();
 
-    try cx.unify(vX, int);
+    const vX = try cx.newTypeVar();
+    const vY = try cx.newTypeVar();
+    const vR = try cx.newTypeVar();
+
+    const U = try cx.newUnion(&.{ int, str });
+    const vN = try cx.newTypeVar();
+
+    const QD = try cx.newDict(&.{ .{ 0, vN }, .{ 1, int }, .{ 2, float } });
+    const D = try cx.newDict(&.{ .{ 0, vY }, .{ 1, int }, .{ 2, float } });
+
+    const QS = try cx.newApplicative(0, &.{QD});
+    const S = try cx.newApplicative(0, &.{D});
+
+    const vZ = try cx.newTypeVar();
+    const QT = try cx.newTuple(&.{ str, QS });
+    const T = try cx.newTuple(&.{ vZ, S });
+
+    try cx.unify(vX, QT);
+    try cx.unify(vR, T);
+    try cx.unify(vX, vR);
 
     const addable_c = try cx.registerSolver(&Addable{
         .combos = &.{
             .{ .a = int.concrete, .b = int.concrete, .r = int.concrete },
             .{ .a = float.concrete, .b = float.concrete, .r = float.concrete },
             .{ .a = str.concrete, .b = str.concrete, .r = str.concrete },
+
+            .{ .a = str.concrete, .b = int.concrete, .r = str.concrete },
+            .{ .a = str.concrete, .b = float.concrete, .r = str.concrete },
+            .{ .a = float.concrete, .b = int.concrete, .r = float.concrete },
         },
     });
     try cx.addConstraint(.{
         .solver = addable_c,
-        .params = &.{ vX, vY, vR },
+        .params = &.{ U, int, vN },
     });
 
-    try cx.solveAll();
+    cx.solveAll() catch |err| {
+        cx.dump();
+        return err;
+    };
 
     cx.dump();
 }
