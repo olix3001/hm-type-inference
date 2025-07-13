@@ -75,7 +75,13 @@ pub const Constraint = struct {
     params: []const TypeId,
 
     monomorphize_unions: bool = true,
+    is_signature: bool = false,
     combine_groups: ?[]const TypeId = null,
+};
+
+pub const Signature = struct {
+    params: []TypeId,
+    constraints: []usize,
 };
 
 pub const Context = struct {
@@ -88,8 +94,14 @@ pub const Context = struct {
     solvers: std.ArrayListUnmanaged(Solver) = .{},
     worklist: std.ArrayListUnmanaged(Constraint) = .{},
 
+    signature_stack: std.ArrayListUnmanaged(struct {
+        params: std.ArrayListUnmanaged(TypeId) = .{},
+        constraints: std.ArrayListUnmanaged(usize) = .{},
+    }) = .{},
+
     pub const Entry = union(enum) {
         unresolved: void, // We know nothing about this type.
+        parameter: void, // We do not want to know anything about this type as it is a placeholder.
         link: EntryId, // This type is the same as EntryId.
         resolved: TypeId, // We know the main element of this type, but some parts remain unresolved.
         qualified: TypeId, // This type is fully known.
@@ -105,6 +117,7 @@ pub const Context = struct {
 
             switch (self) {
                 .unresolved => try writer.writeAll("unresolved"),
+                .parameter => try writer.writeAll("parameter"),
                 .link => |link| try writer.print("link:{d}", .{link}),
                 .resolved => |tid| try writer.print("resolved:{d}", .{tid}),
                 .qualified => |tid| try writer.print("qualified:{d}", .{tid}),
@@ -131,6 +144,16 @@ pub const Context = struct {
         const id = self.entries.items.len;
         try self.entries.append(self.allocator, .unresolved);
         return try self.addType(.{ .variable = id });
+    }
+    pub fn newParam(self: *Self) !TypeId {
+        const id = self.entries.items.len;
+        try self.entries.append(self.allocator, .parameter);
+        const type_id = try self.addType(.{ .variable = id });
+        if (self.signature_stack.items.len > 0) {
+            var last = &self.signature_stack.items[self.signature_stack.items.len - 1];
+            try last.params.append(self.arena.allocator(), type_id);
+        }
+        return type_id;
     }
     pub fn newConcrete(self: *Self) !TypeId {
         return try self.addType(.{ .concrete = self.types.items.len + 1 });
@@ -189,7 +212,7 @@ pub const Context = struct {
                         try path.append(current);
                         current = next;
                     },
-                    .unresolved => {
+                    .unresolved, .parameter => {
                         self.compressPath(path.items, current);
                         return try self.findVariable(current);
                     },
@@ -354,6 +377,51 @@ pub const Context = struct {
         }
     }
 
+    pub fn beginSignature(self: *Self) !void {
+        try self.signature_stack.append(self.arena.allocator(), .{});
+    }
+
+    pub fn endSignature(self: *Self) !Signature {
+        var last = self.signature_stack.pop().?;
+        return .{
+            .params = try last.params.toOwnedSlice(self.arena.allocator()),
+            .constraints = try last.constraints.toOwnedSlice(self.arena.allocator()),
+        };
+    }
+
+    // Clone signature. This function assumes that everything passes as `ty` is a parameter.
+    // It will clone all provided variables and constraints related to them.
+    pub fn cloneSignature(self: *Self, sig: Signature) ![]const TypeId {
+        const alloc = self.arena.allocator();
+        var fresh_vars = try alloc.alloc(TypeId, sig.params.len);
+
+        for (sig.params, 0..) |param, i| {
+            fresh_vars[i] = blk: switch (self.types.items[param]) {
+                .variable => |_| break :blk try self.newTypeVar(),
+                else => unreachable,
+            };
+        }
+
+        for (sig.constraints) |c| {
+            const constraint = self.worklist.items[c];
+            var new_params = try alloc.alloc(TypeId, constraint.params.len);
+            for (constraint.params, 0..) |param, i| {
+                const old_index = std.mem.indexOf(TypeId, sig.params, &.{param});
+                if (old_index == null) return error.InvalidSignature;
+                new_params[i] = fresh_vars[old_index.?];
+            }
+
+            try self.addConstraint(.{
+                .solver = constraint.solver,
+                .params = new_params,
+                .monomorphize_unions = constraint.monomorphize_unions,
+                .combine_groups = constraint.combine_groups,
+            });
+        }
+
+        return fresh_vars;
+    }
+
     pub fn registerSolver(self: *Self, solver: anytype) !usize {
         const current = self.solvers.items.len;
         try self.solvers.append(self.allocator, .{
@@ -364,7 +432,13 @@ pub const Context = struct {
     }
 
     pub fn addConstraint(self: *Self, constraint: Constraint) !void {
-        try self.worklist.append(self.allocator, constraint);
+        var c = constraint;
+        if (self.signature_stack.items.len > 0) {
+            var last = &self.signature_stack.items[self.signature_stack.items.len - 1];
+            try last.constraints.append(self.arena.allocator(), self.worklist.items.len);
+            c.is_signature = true;
+        }
+        try self.worklist.append(self.allocator, c);
     }
 
     pub fn solveConstraints(self: *Self) !void {
@@ -376,6 +450,7 @@ pub const Context = struct {
         defer result_groups.deinit();
 
         while (self.worklist.pop()) |c| {
+            if (c.is_signature) continue;
             const solver = self.solvers.items[c.solver];
 
             if (c.monomorphize_unions) {
@@ -446,17 +521,18 @@ pub const Context = struct {
                 .link => |id| {
                     const item = self.entries.items[id];
                     switch (item) {
-                        .resolved => |ty| entry.* = self.newResolved(try self.normalize(ty)),
+                        .resolved, .qualified => |ty| entry.* = self.newResolved(try self.normalize(ty)),
                         else => {},
                     }
                 },
                 .resolved => |ty| entry.* = self.newResolved(try self.normalize(ty)),
-                .qualified, .unresolved => {},
+                .qualified, .unresolved, .parameter => {},
             }
         }
 
         for (self.entries.items, 0..) |entry, i| {
-            if (std.meta.activeTag(entry) != .qualified) {
+            const active = std.meta.activeTag(entry);
+            if (active != .qualified and active != .parameter) {
                 std.debug.print("Type variable ?T{d} remains unqualified.\n", .{i});
                 return error.UnsatisfiedConstraints;
             }

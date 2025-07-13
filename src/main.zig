@@ -17,30 +17,6 @@ pub fn main() !void {
     const float_t = try cx.newConcrete();
     const str_t = try cx.newConcrete();
 
-    // Initialize all variables.
-    const TA = try cx.newTypeVar();
-    const TB = try cx.newTypeVar();
-    const TC = try cx.newTypeVar();
-
-    const TX = try cx.newTypeVar();
-    const TY = try cx.newTypeVar();
-
-    // Play with them.
-    const U = try cx.newUnion(&.{ int_t, str_t });
-
-    const QT = try cx.newTuple(&.{ TA, int_t, float_t });
-    const T = try cx.newTuple(&.{ TB, int_t, float_t });
-
-    const QS = try cx.newApplicative(0, &.{QT});
-    const S = try cx.newApplicative(0, &.{T});
-
-    const QT2 = try cx.newTuple(&.{ str_t, QS });
-    const T2 = try cx.newTuple(&.{ TC, S });
-
-    try cx.unify(TX, QT2);
-    try cx.unify(TY, T2);
-    try cx.unify(TX, TY);
-
     const addable_c = try cx.registerSolver(&Addable{
         .combos = &.{
             .{ .a = int_t, .b = int_t, .r = int_t },
@@ -53,10 +29,27 @@ pub fn main() !void {
         },
     });
 
+    // Instantiation and analysis of `add(a, b)`.
+    try cx.beginSignature();
+    const param_a = try cx.newParam();
+    const param_b = try cx.newParam();
+
+    // Return type of function.
+    const add_ret = try cx.newParam();
     try cx.addConstraint(.{
         .solver = addable_c,
-        .params = &.{ U, int_t, TA },
+        .params = &.{ param_a, param_b, add_ret },
     });
+    const add_sig = try cx.endSignature();
+    std.debug.print("Signature: {any}\n", .{add_sig});
+
+    // Variable assignment `x := add(int, int)`
+    const x = try cx.newTypeVar(); // ENTRY 3
+    const new_sig = try cx.cloneSignature(add_sig);
+
+    try cx.unify(new_sig[0], int_t);
+    try cx.unify(new_sig[1], int_t);
+    try cx.unify(x, new_sig[2]);
 
     cx.solveConstraints() catch |err| {
         cx.dump();
