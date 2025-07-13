@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const new = @import("new.zig");
+
 pub const ApplicationId = usize;
 pub const TypeId = usize;
 pub const EntryId = usize;

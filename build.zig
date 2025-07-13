@@ -27,6 +27,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const ziglangSet = b.dependency("ziglangSet", .{});
+    lib_mod.addImport("ziglangSet", ziglangSet.module("ziglangSet"));
 
     // We will also create a module for our other entry point, 'main.zig'.
     const exe_mod = b.createModule(.{
